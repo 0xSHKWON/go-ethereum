@@ -2757,6 +2757,59 @@ func TestSimulateV1WithdrawalsByFork(t *testing.T) {
 	})
 }
 
+func TestSimulateV1SlotNumber(t *testing.T) {
+	t.Parallel()
+
+	var (
+		cfg      = *params.MergedTestChainConfig
+		slotAddr = common.HexToAddress("0x0000000000000000000000000000000000005107")
+	)
+	cfg.AmsterdamTime = new(uint64)
+	gspec := &core.Genesis{
+		Config: &cfg,
+		Alloc: types.GenesisAlloc{
+			// SLOTNUM; MSTORE; RETURN the slot number as a 32-byte word.
+			slotAddr: {Balance: common.Big0, Code: common.FromHex("0x4b60005260206000f3")},
+		},
+	}
+	backend := newTestBackend(t, 1, gspec, beacon.New(ethash.NewFaker()), func(i int, b *core.BlockGen) {})
+
+	ctx := context.Background()
+	stateDB, baseHeader, err := backend.StateAndHeaderByNumberOrHash(ctx, rpc.BlockNumberOrHashWithNumber(rpc.LatestBlockNumber))
+	if err != nil {
+		t.Fatalf("failed to get state and header: %v", err)
+	}
+	if baseHeader.SlotNumber == nil {
+		t.Fatal("base header has no slot number")
+	}
+	sim := &simulator{
+		b:           backend,
+		state:       stateDB,
+		base:        baseHeader,
+		chainConfig: backend.ChainConfig(),
+		budget:      newGasBudget(0),
+	}
+	call := simBlock{Calls: []TransactionArgs{{To: &slotAddr}}}
+	results, err := sim.execute(ctx, []simBlock{call, call})
+	if err != nil {
+		t.Fatalf("simulation execution failed: %v", err)
+	}
+	require.Len(t, results, 2)
+	for i, res := range results {
+		want := *baseHeader.SlotNumber + uint64(i) + 1
+		if got := res.Block.Header().SlotNumber; got == nil || *got != want {
+			t.Errorf("block %d: unexpected header slot number: got %v, want %d", i, got, want)
+		}
+		require.Len(t, res.Calls, 1)
+		if res.Calls[0].Status != hexutil.Uint64(types.ReceiptStatusSuccessful) {
+			t.Fatalf("block %d: call failed: %v", i, res.Calls[0].Error)
+		}
+		if got := new(big.Int).SetBytes(res.Calls[0].ReturnValue).Uint64(); got != want {
+			t.Errorf("block %d: SLOTNUM returned %d, want %d", i, got, want)
+		}
+	}
+}
+
 func TestSignTransaction(t *testing.T) {
 	t.Parallel()
 	// Initialize test accounts
